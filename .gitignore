@@ -1,0 +1,1 @@
+*.exe *.bin server_state/ *.log cert.pem key.pem *.jsonl *.yml

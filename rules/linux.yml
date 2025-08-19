@@ -1,0 +1,36 @@
+- id: LNX-SSH-ROOT-001
+  title: SSH root login disabled
+  os: linux
+  severity: high
+  query:
+    type: file_grep
+    path: /etc/ssh/sshd_config
+    pattern: "^PermitRootLogin\\s+no$"
+  expect:
+    exists: true
+  fix: "Edit sshd_config => PermitRootLogin no && systemctl restart sshd"
+
+- id: LNX-FW-001
+  title: Firewall active (ufw/firewalld/iptables)
+  os: linux
+  severity: high
+  query:
+    type: cmd
+    cmd: "command -v ufw >/dev/null && ufw status | head -1 || \
+          command -v firewall-cmd >/dev/null && systemctl is-active firewalld || \
+          systemctl is-active iptables"
+  expect:
+    contains_any: ["Status: active","active"]
+  fix: "Enable firewall: ufw enable | systemctl enable --now firewalld"
+
+- id: LNX-PASS-001
+  title: Password min length >= 12
+  os: linux
+  severity: medium
+  query:
+    type: file_grep
+    path: /etc/login.defs
+    pattern: "^PASS_MIN_LEN\\s+(\\d+)"
+  expect:
+    gte: 12
+  fix: "Set PASS_MIN_LEN 12 in /etc/login.defs"
