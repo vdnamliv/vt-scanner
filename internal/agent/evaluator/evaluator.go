@@ -3,58 +3,52 @@ package evaluator
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
-func normalizeValue(val interface{}) string {
-	if val == nil {
-		return ""
+func Evaluate(actual string, expect map[string]interface{}) (bool, string) {
+	a := strings.TrimSpace(actual)
+	if strings.HasPrefix(a, "ERROR:") {
+		return false, a
 	}
-	if b, ok := val.(bool); ok {
-		return map[bool]string{true: "1", false: "0"}[b]
+	// equals
+	if v, ok := expect["equals"]; ok {
+		exp := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if strings.EqualFold(a, exp) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("expected equals %q, got %q", exp, a)
 	}
-	valStr := strings.TrimSpace(fmt.Sprintf("%v", val))
-	switch valStr {
-	case "true", "enabled", "up", "on":
-		return "1"
-	case "false", "disabled", "down", "off":
-		return "0"
+	// contains
+	if v, ok := expect["contains"]; ok {
+		exp := strings.ToLower(fmt.Sprintf("%v", v))
+		if strings.Contains(strings.ToLower(a), exp) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("expected contains %q", v)
 	}
-	return strings.ToLower(valStr)
-}
-
-func Evaluate(actual string, expect map[string]interface{}) bool {
-	actualNorm := normalizeValue(actual)
-	if strings.Contains(actualNorm, "\n") {
-		actualNorm = strings.Split(actualNorm, "\n")[0]
-	}
-
-	if eq, ok := expect["equals"]; ok {
-		return actualNorm == normalizeValue(eq)
-	}
-	if cont, ok := expect["contains"]; ok {
-		return strings.Contains(actualNorm, strings.ToLower(cont.(string)))
-	}
-	if contAny, ok := expect["contains_any"]; ok {
-		for _, item := range contAny.([]interface{}) {
-			if strings.Contains(actualNorm, strings.ToLower(item.(string))) {
-				return true
+	// in
+	if v, ok := expect["in"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, ev := range arr {
+				if strings.EqualFold(a, strings.TrimSpace(fmt.Sprintf("%v", ev))) {
+					return true, ""
+				}
 			}
+			return false, fmt.Sprintf("expected one of %v, got %q", arr, a)
 		}
-		return false
 	}
-	if exists, ok := expect["exists"]; ok {
-		return (actualNorm != "") == exists.(bool)
-	}
-	if gte, ok := expect["gte"]; ok {
-		re := regexp.MustCompile(`\d+`)
-		m := re.FindString(actualNorm)
-		if m == "" {
-			return false
+	// regex
+	if v, ok := expect["regex"]; ok {
+		pat := fmt.Sprintf("%v", v)
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			return false, "bad regex: " + err.Error()
 		}
-		val, _ := strconv.Atoi(m)
-		return val >= gte.(int)
+		if re.MatchString(a) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("expected match /%s/", pat)
 	}
-	return false
+	return false, "no supported operator in expect"
 }

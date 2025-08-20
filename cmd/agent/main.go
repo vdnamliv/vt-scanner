@@ -1,7 +1,11 @@
 package main
 
+// lay + ghi nho thong tin agent_id/agent_secret/poll_interval
+// neu chua co thi enroll voi server
+// theo poll_interval, goi agent
+
 import (
-	"encoding/json"
+	"encoding/json"  
 	"flag"
 	"fmt"
 	"log"
@@ -13,12 +17,12 @@ import (
 type Credentials struct {
 	AgentID      string `json:"agent_id"`
 	AgentSecret  string `json:"agent_secret"`
-	PollInterval int    `json:"poll_interval"`
+	PollInterval int    `json:"poll_interval"` //chu ky mac dinh cho agent
 }
 
 func loadCredentials() (string, string, int, error) {
-	cacheDir := os.Getenv("HOME") + "/.vt_agent"
-	cacheFile := cacheDir + "/creds.json"
+	cacheDir := os.Getenv("HOME") + "/.vt_agent"	// nên dùng os.UserHomeDir() để đa nền tảng
+	cacheFile := cacheDir + "/creds.json"			// file chứa thông tin đăng nhập
 	if _, err := os.Stat(cacheFile); err == nil {
 		data, err := os.ReadFile(cacheFile)
 		if err != nil {
@@ -30,7 +34,7 @@ func loadCredentials() (string, string, int, error) {
 		}
 		return creds.AgentID, creds.AgentSecret, creds.PollInterval, nil
 	}
-	return "", "", 0, fmt.Errorf("no cached credentials")
+	return "", "", 0, fmt.Errorf("no cached credentials")	//tín hiệu để enroll
 }
 
 func saveCredentials(aid, sec string, poll int) error {
@@ -43,19 +47,19 @@ func saveCredentials(aid, sec string, poll int) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cacheFile, data, 0644)
+	return os.WriteFile(cacheFile, data, 0644) //0644: quyền truy cập cho chủ sở hữu (read/write), nhóm (read), và người khác (read)
 }
 
 func main() {
 	hostname, _ := os.Hostname() // Khai báo hostname ở đây
 	log.Printf("Agent starting on host: %s", hostname)
-	serverURL := flag.String("server", "http://127.0.0.1:8000", "Server URL")
-	enrollKey := flag.String("enroll-key", "ORG_KEY_DEMO", "Enrollment key")
-	interval := flag.Int("interval", 600, "Poll interval in seconds")
-	once := flag.Bool("once", false, "Run one cycle then exit")
+	serverURL := flag.String("server", "http://127.0.0.1:8000", "Server URL") // mặc định URL của server để enroll
+	enrollKey := flag.String("enroll-key", "ORG_KEY_DEMO", "Enrollment key")  // mặc định enrollment key là ORG_KEY_DEMO
+	interval := flag.Int("interval", 600, "Poll interval in seconds")		  // mặc định poll interval là 600 giây
+	once := flag.Bool("once", false, "Run one cycle then exit")				  // thêm flag cho chế độ chạy một lần
 	flag.Parse()
 
-	aid, sec, poll, err := loadCredentials()
+	aid, sec, poll, err := loadCredentials()	//thử load credentials cache
 	if err != nil || aid == "" {
 		aid, sec, poll = agent.Enroll(*serverURL, *enrollKey)
 		if err := saveCredentials(aid, sec, poll); err != nil {
@@ -66,11 +70,11 @@ func main() {
 		log.Printf("Loaded cached credentials: agent_id=%s", aid)
 	}
 
-	if *interval != 0 {
+	if *interval != 0 { // nếu có flag interval thì dùng nó, nếu không thì dùng giá trị từ cache
 		poll = *interval
 	}
 
-	if *once {
+	if *once {	// nếu có flag once thì chạy một lần
 		if err := agent.RunOnce(*serverURL, aid, sec, hostname); err != nil {
 			log.Fatalf("Run failed: %v", err)
 		}
@@ -84,3 +88,6 @@ func main() {
 		time.Sleep(time.Duration(poll) * time.Second)
 	}
 }
+
+// build: go build cmd/agent/main.go
+// run: .\agent.exe --server http://localhost:8000 --enroll-key ORG_KEY_DEMO --once
