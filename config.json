@@ -1,0 +1,6 @@
+{
+  "server": "http://localhost:8000",
+  "enroll_key": "ORG_KEY_DEMO",
+  "interval": 600,
+  "once": false
+}

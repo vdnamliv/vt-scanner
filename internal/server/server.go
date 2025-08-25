@@ -424,7 +424,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 			FROM runs
 			GROUP BY agent_id
 		)
-		SELECT runs.run_id, runs.hostname, runs.agent_id, results.title, results.status, results.reason, results.fix
+		SELECT runs.run_id, runs.hostname, runs.agent_id, results.title, results.status, results.reason, results.fix, runs.received_at
 		FROM latest
 		JOIN runs    ON runs.id = latest.id
 		JOIN results ON results.run_fk = runs.id
@@ -440,13 +440,15 @@ func index(w http.ResponseWriter, r *http.Request) {
 	var trs []string
 	for rows.Next() {
 		var runID, hostname, agentID, policyTitle, status, reason, fix string
-		if err := rows.Scan(&runID, &hostname, &agentID, &policyTitle, &status, &reason, &fix); err != nil {
+		var receivedAt int64
+		if err := rows.Scan(&runID, &hostname, &agentID, &policyTitle, &status, &reason, &fix, &receivedAt); err != nil {
 			continue
 		}
 		statusCls := map[string]string{"PASS": "PASS", "FAIL": "FAIL"}[status]
+		runTime := time.Unix(receivedAt, 0).Format("2006-01-02 15:04:05")
 		trs = append(trs, fmt.Sprintf(
 			"<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><pre>%s</pre></td><td><pre>%s</pre></td></tr>",
-			statusCls, esc(runID), esc(hostname), esc(agentID), esc(policyTitle), esc(status), esc(reason), esc(fix),
+			statusCls, esc(runTime), esc(hostname), esc(agentID), esc(policyTitle), esc(status), esc(reason), esc(fix),
 		))
 	}
 	if err := rows.Err(); err != nil {
@@ -465,7 +467,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 		<h2>Latest Results</h2>
 		<form method="post" action="/reload_policies"><button type="submit">Reload policies</button></form>
 		<table>
-			<tr><th>Run</th><th>Host</th><th>Agent</th><th>Policy</th><th>Status</th><th>Reason</th><th>Fix</th></tr>
+			<tr><th>Time</th><th>Host</th><th>Agent</th><th>Policy</th><th>Status</th><th>Reason</th><th>Fix</th></tr>
 			%s
 		</table>
 		</body></html>`, strings.Join(trs, ""))
