@@ -64,18 +64,16 @@ func init() {
 func initDB() {
 	os.MkdirAll(filepath.Join("server_state"), 0755)
 
+	dbPath := filepath.Join("server_state", "audit.db")
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL", dbPath)
+
 	var err error
-	db, err = sql.Open("sqlite3", filepath.Join("server_state", "audit.db"))
+	db, err = sql.Open("sqlite3", dsn)
 	if err != nil {
-		log.Fatal("DB error:", err)
+		log.Fatal("DB open error:", err)
 	}
 
-	// Bật FK cho SQLite
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
-		log.Fatal("DB pragma error:", err)
-	}
-
-	// Bảng agents: persist agent & fingerprint
+	// Bảng agents (giữ nguyên nếu bạn đang dùng)
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS agents (
 			agent_id     TEXT PRIMARY KEY,
@@ -91,7 +89,7 @@ func initDB() {
 		log.Fatal("DB init agents error:", err)
 	}
 
-	// Schema runs/results
+	// Bảng runs
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +99,13 @@ func initDB() {
 			run_id      TEXT,
 			received_at INTEGER
 		);
+	`)
+	if err != nil {
+		log.Fatal("DB init runs error:", err)
+	}
 
+	// Bảng results: thêm cột fix TEXT
+	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS results (
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
 			run_fk    INTEGER NOT NULL,
@@ -111,16 +115,13 @@ func initDB() {
 			status    TEXT,
 			expected  TEXT,
 			reason    TEXT,
+			fix       TEXT,
 			FOREIGN KEY(run_fk) REFERENCES runs(id) ON DELETE CASCADE
 		);
 	`)
 	if err != nil {
-		log.Fatal("DB init error:", err)
+		log.Fatal("DB init results error:", err)
 	}
-
-	// Migration nhẹ
-	_, _ = db.Exec(`ALTER TABLE results ADD COLUMN reason TEXT;`)
-	_, _ = db.Exec(`ALTER TABLE results DROP COLUMN actual;`)
 }
 
 func loadRulesByOS() {
@@ -280,12 +281,12 @@ func results(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		AgentID    string `json:"agent_id"`
-		RunID      string `json:"run_id"`
-		OS         string `json:"os"`
-		Hostname   string `json:"hostname"`
+		AgentID     string `json:"agent_id"`
+		RunID       string `json:"run_id"`
+		OS          string `json:"os"`
+		Hostname    string `json:"hostname"`
 		Fingerprint string `json:"fingerprint"`
-		Results    []struct {
+		Results     []struct {
 			PolicyID string `json:"policy_id"`
 			ID       string `json:"id"`
 			Title    string `json:"title"`
@@ -293,14 +294,15 @@ func results(w http.ResponseWriter, r *http.Request) {
 			Status   string `json:"status"`
 			Expected string `json:"expected"`
 			Reason   string `json:"reason"`
+			Fix      string `json:"fix"` // <-- nhận fix từ agent (YAML)
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	received := int(time.Now().Unix())
 
+	received := int(time.Now().Unix())
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("DB begin error: %v", err)
@@ -308,28 +310,47 @@ func results(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// chèn run
+	// DỌN kết quả cũ của agent này để chỉ giữ bản mới nhất
+	if _, err := tx.Exec(`DELETE FROM results WHERE run_fk IN (SELECT id FROM runs WHERE agent_id = ?)`, aid); err != nil {
+		log.Printf("DB delete old results error: %v", err)
+		tx.Rollback()
+		http.Error(w, "DB delete error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM runs WHERE agent_id = ?`, aid); err != nil {
+		log.Printf("DB delete old runs error: %v", err)
+		tx.Rollback()
+		http.Error(w, "DB delete error", http.StatusInternalServerError)
+		return
+	}
+
+	// Chèn RUN mới
 	resRun, err := tx.Exec(
 		"INSERT INTO runs(agent_id, hostname, os, run_id, received_at) VALUES (?, ?, ?, ?, ?)",
 		aid, payload.Hostname, payload.OS, payload.RunID, received,
 	)
 	if err != nil {
-		log.Printf("DB exec runs error: %v", err)
+		log.Printf("DB insert run error: %v", err)
 		tx.Rollback()
 		http.Error(w, "DB exec error", http.StatusInternalServerError)
 		return
 	}
 	runFK, _ := resRun.LastInsertId()
 
-	// chèn results
+	// Chèn RESULTS mới (gán fix theo PASS/FAIL)
 	for _, rr := range payload.Results {
 		pid := rr.PolicyID
 		if pid == "" {
 			pid = rr.ID
 		}
+		fixToStore := "None"
+		if strings.ToUpper(rr.Status) == "FAIL" && strings.TrimSpace(rr.Fix) != "" {
+			fixToStore = rr.Fix
+		}
+
 		if _, err := tx.Exec(
-			"INSERT INTO results(run_fk, policy_id, title, severity, status, expected, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			runFK, pid, rr.Title, rr.Severity, rr.Status, rr.Expected, rr.Reason,
+			"INSERT INTO results(run_fk, policy_id, title, severity, status, expected, reason, fix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			runFK, pid, rr.Title, rr.Severity, rr.Status, rr.Expected, rr.Reason, fixToStore,
 		); err != nil {
 			log.Printf("DB insert results error: %v", err)
 			tx.Rollback()
@@ -345,7 +366,7 @@ func results(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// JSONL (nhật ký thô)
+	// (Tùy chọn) ghi JSONL
 	f, err := os.OpenFile(filepath.Join("server_state", "results.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		_ = json.NewEncoder(f).Encode(map[string]interface{}{
@@ -398,9 +419,16 @@ func reloadPolicies(w http.ResponseWriter, r *http.Request) {
 
 func index(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`
-		SELECT runs.run_id, runs.hostname, runs.agent_id, results.title, results.status, results.reason
-		FROM results JOIN runs ON results.run_fk = runs.id
-		ORDER BY runs.id DESC LIMIT 100
+		WITH latest AS (
+			SELECT agent_id, MAX(id) AS id
+			FROM runs
+			GROUP BY agent_id
+		)
+		SELECT runs.run_id, runs.hostname, runs.agent_id, results.title, results.status, results.reason, results.fix
+		FROM latest
+		JOIN runs    ON runs.id = latest.id
+		JOIN results ON results.run_fk = runs.id
+		ORDER BY runs.id DESC
 	`)
 	if err != nil {
 		http.Error(w, "DB query error", http.StatusInternalServerError)
@@ -408,18 +436,17 @@ func index(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	esc := html.EscapeString // alias để gọi ngắn gọn
-
+	esc := html.EscapeString
 	var trs []string
 	for rows.Next() {
-		var runID, hostname, agentID, policyTitle, status, reason string
-		if err := rows.Scan(&runID, &hostname, &agentID, &policyTitle, &status, &reason); err != nil {
+		var runID, hostname, agentID, policyTitle, status, reason, fix string
+		if err := rows.Scan(&runID, &hostname, &agentID, &policyTitle, &status, &reason, &fix); err != nil {
 			continue
 		}
 		statusCls := map[string]string{"PASS": "PASS", "FAIL": "FAIL"}[status]
 		trs = append(trs, fmt.Sprintf(
-			"<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><pre>%s</pre></td></tr>",
-			statusCls, esc(runID), esc(hostname), esc(agentID), esc(policyTitle), esc(status), esc(reason),
+			"<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><pre>%s</pre></td><td><pre>%s</pre></td></tr>",
+			statusCls, esc(runID), esc(hostname), esc(agentID), esc(policyTitle), esc(status), esc(reason), esc(fix),
 		))
 	}
 	if err := rows.Err(); err != nil {
@@ -438,7 +465,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 		<h2>Latest Results</h2>
 		<form method="post" action="/reload_policies"><button type="submit">Reload policies</button></form>
 		<table>
-			<tr><th>Run</th><th>Host</th><th>Agent</th><th>Policy</th><th>Status</th><th>Reason</th></tr>
+			<tr><th>Run</th><th>Host</th><th>Agent</th><th>Policy</th><th>Status</th><th>Reason</th><th>Fix</th></tr>
 			%s
 		</table>
 		</body></html>`, strings.Join(trs, ""))
