@@ -12,6 +12,7 @@ key.pem
 
 # data/artifacts
 *.jsonl
-*.yml
 
 *.db
+
+*.syso

@@ -1,0 +1,129 @@
+- id: MAC-BIOS-FIRSTBOOT-001
+  title: "First boot từ ổ cứng"
+  severity: medium
+  rationale: "Không được thiết lập first boot từ các nguồn khác như CD-ROM, USB, ethernet."
+  query:
+    type: bash
+    cmd: system_profiler SPStorageDataType | grep "Boot Volume"
+  expect:
+    regex: ".*Internal.*"
+  pass_text: "First boot từ ổ cứng"
+  fail_text: "First boot từ nguồn khác"
+  fix: "Vào System Settings > Startup Disk và chọn internal drive."
+
+- id: MAC-BIOS-PASSWORD-002
+  title: "Mật khẩu BIOS được cài đặt"
+  severity: high
+  rationale: "Cài đặt mật khẩu để bảo vệ BIOS."
+  query:
+    type: bash
+    cmd: sudo firmwarepasswd -check
+  expect:
+    equals: "Password Enabled: Yes"
+  pass_text: "Mật khẩu BIOS đã được đặt"
+  fail_text: "Mật khẩu BIOS chưa được đặt"
+  fix: "Chạy sudo firmwarepasswd -setpasswd để đặt mật khẩu."
+
+- id: MAC-OS-PASSWORD-001
+  title: "Mật khẩu đăng nhập mạnh và không blacklisted"
+  severity: high
+  rationale: "Đảm bảo độ khó và không thuộc danh sách cấm."
+  query:
+    type: bash
+    cmd: pwpolicy getaccountpolicies | grep minimumLength
+  expect:
+    regex: ".*8.*"
+  pass_text: "Chính sách mật khẩu đạt yêu cầu"
+  fail_text: "Mật khẩu không đủ mạnh"
+  fix: "Sử dụng pwpolicy để set minimumLength=8 và các rule phức tạp."
+
+- id: MAC-OS-LOCKSCREEN-002
+  title: "Tự động khóa màn hình sau 5 phút"
+  severity: medium
+  rationale: "Cấu hình tự động khóa sau 5 phút."
+  query:
+    type: bash
+    cmd: defaults -currentHost read com.apple.screensaver idleTime
+  expect:
+    equals: "300"
+  pass_text: "Tự động khóa sau 5 phút"
+  fail_text: "Không khóa sau 5 phút"
+  fix: "Chạy defaults -currentHost write com.apple.screensaver idleTime -int 300."
+
+- id: MAC-OS-ACCOUNTLOCK-003
+  title: "Khóa tài khoản sau 5 lần sai mật khẩu"
+  severity: high
+  rationale: "Khóa ít nhất 5 phút sau 5 lần sai."
+  query:
+    type: bash
+    cmd: pwpolicy getaccountpolicies | grep failedLoginAttempts
+  expect:
+    regex: ".*5.*"
+  pass_text: "Chính sách khóa tài khoản đúng"
+  fail_text: "Chính sách khóa không đúng"
+  fix: "Set pwpolicy với failedLoginAttempts=5 và autoEnableInSeconds=300."
+
+- id: MAC-OS-FIREWALL-INBOUND-004
+  title: "Firewall inbound chặn mặc định, chỉ mở cần thiết"
+  severity: high
+  rationale: "Chặn tất cả, cho phép ping, AD, Antivirus, hạ tầng ảo hóa."
+  query:
+    type: bash
+    cmd: /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+  expect:
+    equals: "Firewall is enabled"
+  pass_text: "Inbound chặn mặc định"
+  fail_text: "Inbound không chặn mặc định"
+  fix: "Bật firewall qua System Settings và cấu hình rules."
+
+- id: MAC-OS-FIREWALL-OUTBOUND-005
+  title: "Firewall outbound mở mặc định"
+  severity: medium
+  rationale: "Thiết lập mở mặc định cho outbound."
+  query:
+    type: bash
+    cmd: /usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode
+  expect:
+    equals: "Stealth mode disabled"
+  pass_text: "Outbound mở mặc định"
+  fail_text: "Outbound không mở mặc định"
+  fix: "Tắt stealth mode nếu cần, nhưng macOS outbound mặc định mở."
+
+- id: MAC-OS-FIREWALL-BLOCKPORTS-006
+  title: "Chặn kết nối giữa máy người dùng trên cổng 135-139, 445"
+  severity: high
+  rationale: "Chặn NetBIOS và Windows shared."
+  query:
+    type: bash
+    cmd: sudo pfctl -s rules | grep "block.*port 135-139,445"
+  expect:
+    regex: ".*block.*"
+  pass_text: "Cổng bị chặn"
+  fail_text: "Cổng không bị chặn"
+  fix: "Chỉnh /etc/pf.conf để thêm rules block cổng và reload pf."
+
+- id: MAC-OS-SUDO-007
+  title: "User khác root, yêu cầu mật khẩu sudo"
+  severity: high
+  rationale: "Không dùng root trực tiếp, yêu cầu pass sudo."
+  query:
+    type: bash
+    cmd: grep '^%admin' /etc/sudoers | grep NOPASSWD
+  expect:
+    not_contains: "NOPASSWD"
+  pass_text: "Yêu cầu mật khẩu sudo"
+  fail_text: "Không yêu cầu mật khẩu sudo"
+  fix: "Chỉnh /etc/sudoers để xóa NOPASSWD."
+
+- id: MAC-OS-REMOTEOFF-008
+  title: "Tắt truy cập từ xa (SSH và tương tự)"
+  severity: high
+  rationale: "Tắt trừ khi được phê duyệt."
+  query:
+    type: bash
+    cmd: systemsetup -getremotelogin
+  expect:
+    equals: "Remote Login: Off"
+  pass_text: "Truy cập từ xa tắt"
+  fail_text: "Truy cập từ xa bật"
+  fix: "Chạy systemsetup -setremotelogin off."

@@ -1,0 +1,182 @@
+- id: LIN-BIOS-UEFI-001
+  title: "BIOS ở chế độ UEFI"
+  severity: high
+  rationale: "Chế độ UEFI cho phép thiết lập nhiều tùy chọn bảo mật hơn so với Legacy."
+  query:
+    type: bash
+    cmd: |
+      if [ -d /sys/firmware/efi ]; then echo 'UEFI'; else echo 'Legacy'; fi
+  expect:
+    equals: "UEFI"
+  pass_text: "BIOS đang ở chế độ UEFI"
+  fail_text: "BIOS đang ở chế độ Legacy"
+  fix: "Vào BIOS setup và chuyển sang chế độ UEFI."
+
+- id: LIN-BIOS-SECUREBOOT-002
+  title: "Secure Boot đang bật"
+  severity: high
+  rationale: "Secure Boot đảm bảo chỉ có phần mềm đã được xác thực mới được nạp trong quá trình khởi động."
+  query:
+    type: bash
+    cmd: mokutil --sb-state | grep "SecureBoot"
+  expect:
+    equals: "SecureBoot enabled"
+  pass_text: "Secure Boot đang bật"
+  fail_text: "Secure Boot tắt"
+  fix: "Bật Secure Boot trong firmware (UEFI)."
+
+- id: LIN-BIOS-FIRSTBOOT-003
+  title: "First boot từ ổ cứng"
+  severity: medium
+  rationale: "Không được thiết lập first boot từ các nguồn khác như CD-ROM, USB, ethernet."
+  query:
+    type: bash
+    cmd: efibootmgr | grep BootOrder | grep -oP 'BootOrder \K.*'
+  expect:
+    regex: "^0000.*"  # Giả sử 0000 là HDD
+  pass_text: "First boot từ ổ cứng"
+  fail_text: "First boot từ nguồn khác"
+  fix: "Vào BIOS setup và đặt boot order ưu tiên ổ cứng."
+
+- id: LIN-BIOS-PASSWORD-004
+  title: "Mật khẩu BIOS được cài đặt"
+  severity: high
+  rationale: "Cài đặt mật khẩu để bảo vệ BIOS."
+  query:
+    type: bash
+    cmd: sudo dmidecode -t bios | grep "Admin Password"
+  expect:
+    equals: "Enabled"
+  pass_text: "Mật khẩu BIOS đã được đặt"
+  fail_text: "Mật khẩu BIOS chưa được đặt"
+  fix: "Vào BIOS setup và đặt mật khẩu admin."
+
+- id: LIN-OS-PASSWORD-001
+  title: "Mật khẩu đăng nhập mạnh và không blacklisted"
+  severity: high
+  rationale: "Đảm bảo độ khó và không thuộc danh sách cấm."
+  query:
+    type: bash
+    cmd: grep '^PASS_MIN_LEN' /etc/login.defs
+  expect:
+    equals: "PASS_MIN_LEN 8"
+  pass_text: "Chính sách mật khẩu đạt yêu cầu"
+  fail_text: "Mật khẩu không đủ mạnh"
+  fix: "Chỉnh /etc/login.defs và pam_pwquality để enforce policy."
+
+- id: LIN-OS-LOCKSCREEN-002
+  title: "Tự động khóa màn hình sau 5 phút"
+  severity: medium
+  rationale: "Cấu hình tự động khóa sau 5 phút."
+  query:
+    type: bash
+    cmd: gsettings get org.gnome.desktop.session idle-delay  # Giả sử GNOME
+  expect:
+    equals: "300"
+  pass_text: "Tự động khóa sau 5 phút"
+  fail_text: "Không khóa sau 5 phút"
+  fix: "Chạy gsettings set org.gnome.desktop.session idle-delay 300."
+
+- id: LIN-OS-ACCOUNTLOCK-003
+  title: "Khóa tài khoản sau 5 lần sai mật khẩu"
+  severity: high
+  rationale: "Khóa ít nhất 5 phút sau 5 lần sai."
+  query:
+    type: bash
+    cmd: grep 'deny=5' /etc/security/faillock.conf
+  expect:
+    equals: "deny=5"
+  pass_text: "Chính sách khóa tài khoản đúng"
+  fail_text: "Chính sách khóa không đúng"
+  fix: "Chỉnh /etc/security/faillock.conf: deny=5, unlock_time=300."
+
+- id: LIN-OS-FIREWALL-INBOUND-004
+  title: "Firewall inbound chặn mặc định, chỉ mở cần thiết"
+  severity: high
+  rationale: "Chặn tất cả, cho phép ping, AD, Antivirus, hạ tầng ảo hóa."
+  query:
+    type: bash
+    cmd: sudo firewall-cmd --get-default-zone --policy
+  expect:
+    regex: ".*DROP.*"  # Hoặc BLOCK tùy distro
+  pass_text: "Inbound chặn mặc định"
+  fail_text: "Inbound không chặn mặc định"
+  fix: "Sử dụng firewall-cmd hoặc ufw để set default deny inbound."
+
+- id: LIN-OS-FIREWALL-OUTBOUND-005
+  title: "Firewall outbound mở mặc định"
+  severity: medium
+  rationale: "Thiết lập mở mặc định cho outbound."
+  query:
+    type: bash
+    cmd: sudo firewall-cmd --get-default-zone --policy-out
+  expect:
+    equals: "ACCEPT"
+  pass_text: "Outbound mở mặc định"
+  fail_text: "Outbound không mở mặc định"
+  fix: "Set default accept outbound qua firewall-cmd."
+
+- id: LIN-OS-FIREWALL-BLOCKPORTS-006
+  title: "Chặn kết nối giữa máy người dùng trên cổng 135-139, 445"
+  severity: high
+  rationale: "Chặn NetBIOS và Windows shared."
+  query:
+    type: bash
+    cmd: sudo iptables -L | grep "DROP.*dports 135:139,445"
+  expect:
+    regex: ".*DROP.*"
+  pass_text: "Cổng bị chặn"
+  fail_text: "Cổng không bị chặn"
+  fix: "Thêm rules iptables hoặc firewalld để drop cổng 135-139,445."
+
+- id: LIN-OS-SUDO-007
+  title: "User khác root, yêu cầu mật khẩu sudo"
+  severity: high
+  rationale: "Không dùng root trực tiếp, yêu cầu pass sudo."
+  query:
+    type: bash
+    cmd: sudo grep '^%sudo' /etc/sudoers | grep NOPASSWD
+  expect:
+    not_contains: "NOPASSWD"
+  pass_text: "Yêu cầu mật khẩu sudo"
+  fail_text: "Không yêu cầu mật khẩu sudo"
+  fix: "Chỉnh /etc/sudoers để xóa NOPASSWD."
+
+- id: LIN-OS-REMOTEOFF-008
+  title: "Tắt truy cập từ xa (SSH và tương tự)"
+  severity: high
+  rationale: "Tắt trừ khi được phê duyệt."
+  query:
+    type: bash
+    cmd: sudo systemctl status ssh | grep Active
+  expect:
+    equals: "inactive"
+  pass_text: "Truy cập từ xa tắt"
+  fail_text: "Truy cập từ xa bật"
+  fix: "systemctl disable --now sshd."
+
+- id: LIN-DEVICE-EDR-001
+  title: "Cài đặt và chạy EDR Ajiant"
+  severity: high
+  rationale: "Phần mềm chống mã độc từ VCS."
+  query:
+    type: bash
+    cmd: sudo systemctl status edr-ajiant | grep active
+  expect:
+    equals: "active (running)"
+  pass_text: "EDR Ajiant đang chạy"
+  fail_text: "EDR Ajiant không cài hoặc không chạy"
+  fix: "Cài đặt từ VCS và khởi động service."
+
+- id: LIN-DEVICE-ANTIVIRUS-002
+  title: "Cài đặt Kaspersky Next EDR, update hàng ngày, quét hàng tuần"
+  severity: high
+  rationale: "Bật realtime protection."
+  query:
+    type: bash
+    cmd: /opt/kaspersky/kesl/bin/kesl-control --status
+  expect:
+    regex: ".*running.*"
+  pass_text: "Kaspersky đang chạy"
+  fail_text: "Kaspersky không cài hoặc không chạy"
+  fix: "Cài đặt Kaspersky, cấu hình cron cho update và scan."

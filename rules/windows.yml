@@ -1,0 +1,211 @@
+- id: WIN-BIOS-UEFI-001
+  title: "BIOS ở chế độ UEFI"
+  severity: high
+  rationale: "UEFI cho phép thiết lập nhiều tùy chọn bảo mật hơn."
+  query:
+    type: registry
+    root: HKLM
+    path: "SYSTEM\\CurrentControlSet\\Control"
+    value: "PEFirmwareType"
+    kind: dword
+  expect:
+    equals: "2"
+  pass_text: "Máy đang chạy UEFI"
+  fail_text: "Máy chạy Legacy hoặc không xác định"
+  fix: "Bật UEFI trong firmware."
+
+- id: WIN-BIOS-SECUREBOOT-002
+  title: "Secure Boot đang bật"
+  severity: high
+  rationale: "Secure Boot đảm bảo chỉ có phần mềm đã được xác thực mới được nạp trong quá trình khởi động."
+  query:
+    type: powershell
+    cmd: |
+      if (Get-Command Confirm-SecureBootUEFI -ErrorAction SilentlyContinue) {
+        try { if (Confirm-SecureBootUEFI) { 'OK' } else { 'Disabled' } } catch { 'NotUEFI' }
+      } else { 'Unknown' }
+  expect:
+    equals: "OK"
+  pass_text: "Secure Boot đang bật"
+  fail_text: "Secure Boot tắt hoặc máy không UEFI"
+  fix: "Bật Secure Boot trong firmware (UEFI)."
+
+- id: WIN-BIOS-FIRSTBOOT-003
+  title: "First boot từ ổ cứng"
+  severity: medium
+  rationale: "Không được thiết lập first boot từ các nguồn khác như CD-ROM, USB, ethernet."
+  query:
+    type: powershell
+    cmd: |
+      bcdedit /enum {bootmgr} | Select-String "device" | ForEach-Object { if ($_ -match "hd") { 'HDD' } else { 'Other' } }
+  expect:
+    equals: "HDD"
+  pass_text: "First boot từ ổ cứng"
+  fail_text: "First boot từ nguồn khác"
+  fix: "Vào BIOS setup và đặt boot order ưu tiên ổ cứng."
+
+- id: WIN-BIOS-PASSWORD-004
+  title: "Mật khẩu BIOS được cài đặt"
+  severity: high
+  rationale: "Cài đặt mật khẩu để bảo vệ BIOS."
+  query:
+    type: cmd
+    cmd: wmic bios get /value | findstr "AdminPasswordStatus"
+  expect:
+    regex: ".*Enabled.*"
+  pass_text: "Mật khẩu BIOS đã được đặt"
+  fail_text: "Mật khẩu BIOS chưa được đặt"
+  fix: "Vào BIOS setup và đặt mật khẩu admin."
+
+- id: WIN-OS-PASSWORD-001
+  title: "Mật khẩu đăng nhập mạnh và không blacklisted"
+  severity: high
+  rationale: "Đảm bảo độ khó và không thuộc danh sách cấm."
+  query:
+    type: cmd
+    cmd: net accounts | findstr "Minimum password length"
+  expect:
+    regex: ".*8.*"
+  pass_text: "Chính sách mật khẩu đạt yêu cầu"
+  fail_text: "Mật khẩu không đủ mạnh"
+  fix: "Sử dụng Group Policy để enforce password policy (ít nhất 8 ký tự, phức tạp)."
+
+- id: WIN-OS-LOCKSCREEN-002
+  title: "Tự động khóa màn hình sau 5 phút"
+  severity: medium
+  rationale: "Sử dụng policy từ Active Directory."
+  query:
+    type: powershell
+    cmd: |
+      try {
+        $v = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'InactivityTimeoutSecs' -ErrorAction Stop).InactivityTimeoutSecs
+        if ($null -eq $v) { 'NOT_SET' } else { $v }
+      } catch { 'NOT_SET' }
+  expect:
+    equals: "300"
+  pass_text: "Tự động khóa sau 5 phút"
+  fail_text: "Không khóa sau 5 phút hoặc chưa cấu hình"
+  fix: "Đặt InactivityTimeoutSecs=300 qua Group Policy (Interactive logon: Machine inactivity limit)."
+
+- id: WIN-OS-ACCOUNTLOCK-003
+  title: "Khóa tài khoản sau 5 lần sai mật khẩu"
+  severity: high
+  rationale: "Khóa ít nhất 5 phút sau 5 lần sai."
+  query:
+    type: cmd
+    cmd: |
+      rem Dùng secedit để tránh lỗi do ngôn ngữ/format của 'net accounts'
+      secedit /export /cfg "%TEMP%\secpol.cfg" >nul 2>&1
+      findstr /R /C:"^LockoutBadCount = " "%TEMP%\secpol.cfg"
+  expect:
+    regex: "^LockoutBadCount = 5$"
+  pass_text: "Chính sách khóa tài khoản đúng"
+  fail_text: "Chính sách khóa không đúng"
+  fix: "Đặt Account lockout threshold = 5 và Account lockout duration = 5 phút trong Group Policy (Computer Configuration → Windows Settings → Security Settings → Account Policies → Account Lockout Policy)."
+
+- id: WIN-OS-FIREWALL-INBOUND-004
+  title: "Firewall inbound chặn mặc định, chỉ mở cần thiết"
+  severity: high
+  rationale: "Chặn tất cả, cho phép ping, AD, Antivirus, hạ tầng ảo hóa."
+  query:
+    type: powershell
+    cmd: Get-NetFirewallProfile -Name Domain | Select-Object DefaultInboundAction
+  expect:
+    equals: "Block"
+  pass_text: "Inbound chặn mặc định"
+  fail_text: "Inbound không chặn mặc định"
+  fix: "Cấu hình firewall qua Group Policy: DefaultInboundAction=Block, thêm rules cho phép cần thiết."
+
+- id: WIN-OS-FIREWALL-OUTBOUND-005
+  title: "Firewall outbound mở mặc định"
+  severity: medium
+  rationale: "Thiết lập mở mặc định cho outbound."
+  query:
+    type: powershell
+    cmd: Get-NetFirewallProfile -Name Domain | Select-Object DefaultOutboundAction
+  expect:
+    equals: "Allow"
+  pass_text: "Outbound mở mặc định"
+  fail_text: "Outbound không mở mặc định"
+  fix: "Cấu hình firewall qua Group Policy: DefaultOutboundAction=Allow."
+
+- id: WIN-OS-FIREWALL-BLOCKPORTS-006
+  title: "Chặn kết nối giữa máy người dùng trên cổng 135-139, 445"
+  severity: high
+  rationale: "Chặn NetBIOS và Windows shared."
+  query:
+    type: powershell
+    cmd: Get-NetFirewallRule | Where-Object { $_.DisplayGroup -eq 'File and Printer Sharing' } | Select-Object Enabled
+  expect:
+    equals: "False"
+  pass_text: "Cổng bị chặn"
+  fail_text: "Cổng không bị chặn"
+  fix: "Tạo rules chặn inbound/outbound trên cổng 135-139, 445."
+
+- id: WIN-OS-REMOTEOFF-007
+  title: "Tắt truy cập từ xa (Remote Desktop)"
+  severity: high
+  rationale: "Tắt trừ khi được phê duyệt."
+  query:
+    type: powershell
+    cmd: Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections"
+  expect:
+    equals: "1"
+  pass_text: "Truy cập từ xa tắt"
+  fail_text: "Truy cập từ xa bật"
+  fix: "Đặt fDenyTSConnections=1 qua regedit hoặc Group Policy."
+
+- id: WIN-DEVICE-JOINDOMAIN-001
+  title: "Thiết bị join domain VIETTELGROUP.VIETTELAD.COM"
+  severity: high
+  rationale: "Đảm bảo quản lý ATTT."
+  query:
+    type: powershell
+    cmd: (Get-WmiObject Win32_ComputerSystem).Domain
+  expect:
+    equals: "VIETTELGROUP.VIETTELAD.COM"
+  pass_text: "Đã join domain"
+  fail_text: "Chưa join domain"
+  fix: "Chạy sysdm.cpl và join domain."
+
+- id: WIN-EDR-AJIANT-001
+  title: "EDR Ajiant cài đặt & đang chạy"
+  severity: high
+  rationale: "Bảo vệ mã độc/giám sát sự cố."
+  query:
+    type: service
+    name: "*Ajiant*"     # hoặc tên dịch vụ cụ thể nếu bạn biết chính xác
+  expect:
+    equals: "Running"
+  pass_text: "Ajiant EDR đang chạy"
+  fail_text: "Ajiant EDR chưa chạy/chưa cài"
+  fix: "Cài đặt/khởi động dịch vụ Ajiant EDR"
+
+- id: WIN-AV-KASP-001
+  title: "Kaspersky Next EDR Foundations đang chạy"
+  severity: high
+  rationale: "Antivirus phải bật realtime & cập nhật định kỳ."
+  query:
+    type: service
+    name: "AVP*"         # Kaspersky AVP + version (AVP21.3, AVP22...)
+  expect:
+    equals: "Running"
+  pass_text: "Kaspersky đang chạy"
+  fail_text: "Kaspersky chưa chạy/chưa cài"
+  fix: "Cài đặt Kaspersky và bật dịch vụ"
+
+- id: WIN-RDP-DISABLE-001
+  title: "Tắt Remote Desktop (nếu không được phê duyệt)"
+  severity: high
+  rationale: "Hạn chế bề mặt tấn công từ xa."
+  query:
+    type: registry
+    root: HKLM
+    path: "SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
+    value: "fDenyTSConnections"
+    kind: dword
+  expect:
+    equals: "1"
+  pass_text: "Remote Desktop đã tắt"
+  fail_text: "Remote Desktop đang bật (chưa có phê duyệt)"
+  fix: "Set-ItemProperty ... -Name fDenyTSConnections -Value 1"
