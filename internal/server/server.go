@@ -1,3 +1,4 @@
+//internal/server/server.go
 package server
 
 import (
@@ -22,9 +23,10 @@ import (
 )
 
 type Agent struct {
-	Secret   string
-	OS       string
-	Hostname string
+	Secret     string
+	OS         string
+	Hostname   string
+	Fingerprint string
 }
 
 type Result struct {
@@ -39,8 +41,7 @@ type Result struct {
 }
 
 var (
-	agents        = map[string]Agent{}                     // cache thông tin agent đã enroll
-	policies      = map[string][]map[string]interface{}{}  // policy theo OS, đọc từ YAML
+	policies      = map[string][]map[string]interface{}{} // policy theo OS, đọc từ YAML
 	policyVersion = 1
 	db            *sql.DB
 )
@@ -74,7 +75,23 @@ func initDB() {
 		log.Fatal("DB pragma error:", err)
 	}
 
-	// Schema mới: results KHÔNG còn 'actual', CÓ thêm 'reason'
+	// Bảng agents: persist agent & fingerprint
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS agents (
+			agent_id     TEXT PRIMARY KEY,
+			agent_secret TEXT NOT NULL,
+			hostname     TEXT,
+			os           TEXT,
+			fingerprint  TEXT UNIQUE,
+			enrolled_at  INTEGER,
+			last_seen    INTEGER
+		);
+	`)
+	if err != nil {
+		log.Fatal("DB init agents error:", err)
+	}
+
+	// Schema runs/results
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,12 +118,8 @@ func initDB() {
 		log.Fatal("DB init error:", err)
 	}
 
-	// --- Migrations cho DB cũ (nếu đã tạo trước đó) ---
-
-	// 1) Thêm cột 'reason' nếu chưa có (IGNORE lỗi nếu đã tồn tại)
+	// Migration nhẹ
 	_, _ = db.Exec(`ALTER TABLE results ADD COLUMN reason TEXT;`)
-
-	// 2) (Tuỳ chọn) Thử drop cột 'actual' nếu SQLite hỗ trợ (>=3.35). IGNORE lỗi nếu không hỗ trợ/không tồn tại.
 	_, _ = db.Exec(`ALTER TABLE results DROP COLUMN actual;`)
 }
 
@@ -162,6 +175,7 @@ func enroll(w http.ResponseWriter, r *http.Request) {
 		OS            string `json:"os"`
 		Arch          string `json:"arch"`
 		Version       string `json:"version"`
+		Fingerprint   string `json:"fingerprint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -171,9 +185,24 @@ func enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad enrollment key", http.StatusForbidden)
 		return
 	}
-	agentID := fmt.Sprintf("ag_%d", time.Now().UnixMilli())
 
-	// sinh secret ngẫu nhiên (thay vì toàn '0')
+	// Xử lý enroll: dùng fingerprint để tái sử dụng agent_id, đồng thời cấp secret mới (vô hiệu agent cũ)
+	now := int(time.Now().Unix())
+	var agentID string
+	var exists bool
+
+	if data.Fingerprint != "" {
+		row := db.QueryRow(`SELECT agent_id FROM agents WHERE fingerprint = ?`, data.Fingerprint)
+		_ = row.Scan(&agentID)
+		if agentID != "" {
+			exists = true
+		}
+	}
+	if !exists {
+		agentID = fmt.Sprintf("ag_%d", time.Now().UnixMilli())
+	}
+
+	// sinh secret ngẫu nhiên
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		http.Error(w, "cannot generate secret", http.StatusInternalServerError)
@@ -181,12 +210,27 @@ func enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	agentSecret := "s_" + hex.EncodeToString(b)
 
-	agents[agentID] = Agent{Secret: agentSecret, OS: data.OS, Hostname: data.Hostname}
+	if exists {
+		_, err := db.Exec(`UPDATE agents SET agent_secret=?, hostname=?, os=?, last_seen=? WHERE agent_id=?`,
+			agentSecret, data.Hostname, data.OS, now, agentID)
+		if err != nil {
+			http.Error(w, "DB update agent error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		_, err := db.Exec(`INSERT INTO agents(agent_id, agent_secret, hostname, os, fingerprint, enrolled_at, last_seen)
+		                  VALUES(?,?,?,?,?,?,?)`,
+			agentID, agentSecret, data.Hostname, data.OS, data.Fingerprint, now, now)
+		if err != nil {
+			http.Error(w, "DB insert agent error", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"agent_id":         agentID,
-		"agent_secret":     agentSecret,
+		"agent_id":          agentID,
+		"agent_secret":      agentSecret,
 		"poll_interval_sec": 600,
 	})
 }
@@ -201,11 +245,18 @@ func authAgent(r *http.Request) (string, Agent, error) {
 		return "", Agent{}, fmt.Errorf("bad token")
 	}
 	aid, sec := token[0], token[1]
-	ag, ok := agents[aid]
-	if !ok || ag.Secret != sec {
+
+	var dbSec, hostname, osName, fp string
+	row := db.QueryRow(`SELECT agent_secret, hostname, os, fingerprint FROM agents WHERE agent_id=?`, aid)
+	if err := row.Scan(&dbSec, &hostname, &osName, &fp); err != nil {
 		return "", Agent{}, fmt.Errorf("invalid agent")
 	}
-	return aid, ag, nil
+	if subtle.ConstantTimeCompare([]byte(dbSec), []byte(sec)) != 1 {
+		return "", Agent{}, fmt.Errorf("invalid agent")
+	}
+	// cập nhật last_seen
+	_, _ = db.Exec(`UPDATE agents SET last_seen=? WHERE agent_id=?`, int(time.Now().Unix()), aid)
+	return aid, Agent{Secret: dbSec, Hostname: hostname, OS: osName, Fingerprint: fp}, nil
 }
 
 func policiesHandler(w http.ResponseWriter, r *http.Request) {
@@ -229,11 +280,12 @@ func results(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		AgentID  string `json:"agent_id"`
-		RunID    string `json:"run_id"`
-		OS       string `json:"os"`
-		Hostname string `json:"hostname"`
-		Results  []struct {
+		AgentID    string `json:"agent_id"`
+		RunID      string `json:"run_id"`
+		OS         string `json:"os"`
+		Hostname   string `json:"hostname"`
+		Fingerprint string `json:"fingerprint"`
+		Results    []struct {
 			PolicyID string `json:"policy_id"`
 			ID       string `json:"id"`
 			Title    string `json:"title"`
@@ -293,7 +345,7 @@ func results(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write JSONL
+	// JSONL (nhật ký thô)
 	f, err := os.OpenFile(filepath.Join("server_state", "results.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		_ = json.NewEncoder(f).Encode(map[string]interface{}{
